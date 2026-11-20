@@ -25,6 +25,11 @@ Muse の Space（TypeScript web artifact）として動作し、記録や食品�
 - `server/src/foodTableData.ts` — 食品標準成分表データ
 - `drizzle/` — マイグレーション（0001〜0017）
 
+## 導入
+
+受け取った Muse にそのまま渡せば立てられるよう、エージェント向けの手順を
+[DEPLOY.md](DEPLOY.md) に同梱している。
+
 ## データについて
 
 - 個人の食事ログ・目標値などの実データは含まない（アプリ側の DB にのみ存在する）。
