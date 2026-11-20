@@ -1,0 +1,125 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1794399373926,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794399373926,
+      "tag": "0002_foods_meal_logs_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794399953391,
+      "tag": "0003_add_food_source_citation",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794434887988,
+      "tag": "0004_add_food_research_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794436301786,
+      "tag": "0005_add_recipes_and_recipe_imports",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794437444727,
+      "tag": "0006_add_food_table_number",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794440489248,
+      "tag": "0007_add_eating_out_flag_to_meal_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794440911619,
+      "tag": "0008_add_target_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794445068116,
+      "tag": "0009_add_food_research_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794445520505,
+      "tag": "0010_add_progress_to_food_research_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794448961975,
+      "tag": "0011_add_blend_basis_to_foods",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794459650562,
+      "tag": "0012_add_micronutrients",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794461170629,
+      "tag": "0013_add_assist_note_to_meal_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1794471070694,
+      "tag": "0014_add_maker_to_food_research",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794484120397,
+      "tag": "0015_add_assist_proposals_cache",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1794485931844,
+      "tag": "0016_add_progress_stages_and_ai_metrics",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1794737361620,
+      "tag": "0017_add_consumption_groups",
+      "breakpoints": true
+    }
+  ]
+}
