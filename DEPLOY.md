@@ -15,8 +15,15 @@
 
 1. このリポジトリのファイル構成のまま、新しい Space として作成する。
 2. DB に `drizzle/` のマイグレーションを 0001 から 0017 まで順に適用する。
-3. 初期データを投入する: アクション `seedFoods` が `server/src/foodTableData.ts`
-   （日本食品標準成分表ベースのデータ）を食品マスタへ投入する。
+3. 食品マスタの初期データを投入する。成分表データはダウンロードではなく
+   `server/src/foodTableData.ts` として同梱されている（出典: 日本食品標準成分表
+   （八訂）増補2023、文部科学省。出典 URL は同ファイル内の定数が保持する）。
+   - `seedFoods`: マスタが空のときだけ、主食等の基本食品を投入する。
+   - `importFoodTable`: 成分表の全食品（約2,500件）を投入する。食品番号キーで
+     冪等なので、初期構築では seedFoods の後に実行してよい。利用者が登録した
+     食品には触れない。
+   - 成分表が改訂されたら、公式公表データから foodTableData.ts を再生成して
+     importFoodTable を再実行する（微量栄養素だけが更新される）。
 4. 特権機能: `server/src/privileged.ts` の `fetchPageText` はホスト側 capability
    （Web ページ本文の取得。市販品の栄養成分をメーカー公式ページから調べる
    「食品リサーチ」の第2段階で使う）。契約定義は `server/.generated/privileged.contract.ts`。
@@ -36,6 +43,8 @@
 
 ## 運用メモ
 
+- 食事の記録手順は同梱スキル `skills/meal-logging/SKILL.md` に従う
+  （写真からの品目分解、根拠表、ラベル優先、代替の開示）。
 - 日々の記録は UI からでも、エージェントがアクション経由でも行える。
   アクションの一覧と引数の正本は `server/src/actions.ts` の `Actions` 定義
   （seedFoods / listFoods / upsertFood / importFoodTable / 食事ログ / レシピ / 摂取グループ / 日次サマリ等）。
