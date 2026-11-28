@@ -4,7 +4,11 @@
     "lib": ["ES2022"],
     "types": ["bun-types"],
     "outDir": "./dist",
-    "rootDir": ".",
+    // rootDir は置かない。Space 版は共通コア（../packages/core/src）を
+    // 相対 import で参照するので、rootDir を server/ に固定すると
+    // 「rootDir の外にある」(TS6059) で型検査が通らなくなる。
+    // 実際のビルドは bun build（outDir/rootDir を見ない）なので、
+    // ここは型検査のための設定だけでよい。
     "tsBuildInfoFile": "./.tsbuildinfo.server",
     "paths": {
       "@space/privileged": ["./.generated/privileged.contract"]

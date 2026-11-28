@@ -9,6 +9,17 @@
 //   body-composition dashboard reads every morning.
 // - logMeal / listFoods / upsertFood let the user's agent record and
 //   register on their behalf (the whole point of replacing Calomeal).
+//
+// Where the code lives （二段構え化, P1）:
+// - 共通コア `packages/core/src` — the Drizzle schema, the nutrient
+//   calculation (マスタ食品 × 量), the read-time aggregation, the
+//   validation rules, and the 食事記録 use cases. No host SDK, so the
+//   ちゃんと版（スマホ）が同じコードを使える。
+// - this file — the host boundary: action definitions (request/response
+//   zod for Muse), inference / ctx.agent / web 取得, 画面の更新通知, and
+//   Space 版だけの関心（利用回数のカウンタ、ai_metrics、期限切れ処理）。
+// - `server/src/store.ts` — the adapter that implements the core's ports
+//   with `ctx.db`.
 
 import {
   defineAction,
@@ -23,6 +34,40 @@ import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 import {
+  dateToDays,
+  daysToDate,
+  emptyMicros,
+  fillMicros,
+  fmtNum,
+  latestTargetEntry,
+  microsFromInput,
+  microsFromTuple,
+  microsOf,
+  nutrientsForGrams,
+  round0,
+  round1,
+  round2,
+  sameMicros,
+  sameTargets,
+  scaleMicros,
+  stringifyStoredJson,
+  sumMicros,
+  todayJstStr,
+  unwrapStoredJson,
+  MICRO_KEYS,
+  MICRO_ROUND,
+  type MicroKey,
+  type MicroValues,
+  type TargetValues,
+} from "../../packages/core/src/index";
+import {
+  getDailySummaries as coreGetDailySummaries,
+  getDailySummary as coreGetDailySummary,
+  listDayEntries as coreListDayEntries,
+  logMeal as coreLogMeal,
+} from "../../packages/core/src/usecases/mealLog";
+import { mealLogDeps } from "./store";
+import {
 FOOD_TABLE,
 FOOD_TABLE_SOURCE_NAME,
 FOOD_TABLE_SOURCE_URL,
@@ -31,10 +76,6 @@ FOOD_TABLE_SOURCE_URL,
 type Db = ReturnType<Ctx["db"]>;
 type FoodRow = typeof schema.foods.$inferSelect;
 type LogRow = typeof schema.mealLogs.$inferSelect;
-
-const round1 = (n: number) => Math.round(n * 10) / 10;
-const round2 = (n: number) => Math.round(n * 100) / 100;
-const round0 = (n: number) => Math.round(n);
 
 // Citation URLs are rendered as <a href> in the client, so a bare
 // z.string().url() is not enough: it happily accepts javascript: /
@@ -54,39 +95,13 @@ const httpUrl = (max: number) =>
 // research records, recipe lines/totals, blend bases). Unknown is always
 // null: never 0-filled, never guessed. Daily totals sum the known values
 // only and stay null when every entry is unknown for that nutrient.
+//
+// The helpers themselves (keys, per-nutrient rounding, scaling, summing)
+// now live in the shared core — packages/core/src/nutrition/micros.ts —
+// so the ちゃんと版 computes the same numbers. What stays here is only the
+// zod shape for MODEL RESPONSES and ACTION INPUTS, which is the host
+// boundary.
 // ---------------------------------------------------------------------------
-
-const MICRO_KEYS = [
-  "fiberG",
-  "potassiumMg",
-  "calciumMg",
-  "magnesiumMg",
-  "ironMg",
-  "vitaminDMcg",
-  "vitaminB1Mg",
-  "vitaminB2Mg",
-  "vitaminB6Mg",
-  "vitaminB12Mcg",
-  "folateMcg",
-  "vitaminCMg",
-] as const;
-type MicroKey = (typeof MICRO_KEYS)[number];
-type MicroValues = Record<MicroKey, number | null>;
-
-const MICRO_ROUND: Record<MicroKey, (n: number) => number> = {
-  fiberG: round1,
-  potassiumMg: round0,
-  calciumMg: round0,
-  magnesiumMg: round0,
-  ironMg: round2,
-  vitaminDMcg: round1,
-  vitaminB1Mg: round2,
-  vitaminB2Mg: round2,
-  vitaminB6Mg: round2,
-  vitaminB12Mcg: round1,
-  folateMcg: round0,
-  vitaminCMg: round0,
-};
 
 // Micronutrient fields for MODEL-RESPONSE schemas (label photo read,
 // staged lookup extraction). The numeric ranges are enforced HERE, in
@@ -126,72 +141,6 @@ const microInputZod = {
   folateMcg: z.number().min(0).max(1000000).nullable().optional(),
   vitaminCMg: z.number().min(0).max(1000000).nullable().optional(),
 };
-
-function microsOf(src: MicroValues): MicroValues {
-  const out = {} as MicroValues;
-  for (const k of MICRO_KEYS) out[k] = src[k];
-  return out;
-}
-
-function emptyMicros(): MicroValues {
-  const out = {} as MicroValues;
-  for (const k of MICRO_KEYS) out[k] = null;
-  return out;
-}
-
-/** Scale every known micronutrient by k, rounded per nutrient. */
-function scaleMicros(m: MicroValues, k: number): MicroValues {
-  const out = {} as MicroValues;
-  for (const key of MICRO_KEYS) {
-    const v = m[key];
-    out[key] = v == null ? null : MICRO_ROUND[key](v * k);
-  }
-  return out;
-}
-
-/** Sum the known values per nutrient; null when nothing is known. */
-function sumMicros(list: MicroValues[]): MicroValues {
-  const out = {} as MicroValues;
-  for (const key of MICRO_KEYS) {
-    let sum = 0;
-    let known = false;
-    for (const m of list) {
-      const v = m[key];
-      if (v != null) {
-        sum += v;
-        known = true;
-      }
-    }
-    out[key] = known ? MICRO_ROUND[key](sum) : null;
-  }
-  return out;
-}
-/** Micronutrients from a FOOD_TABLE tuple (positions 7..18, MICRO_KEYS order). */
-function microsFromTableRow(row: {
-  [i: number]: unknown;
-}): MicroValues {
-  const out = {} as MicroValues;
-  MICRO_KEYS.forEach((k, i) => {
-    const v = row[7 + i];
-    out[k] = typeof v === "number" ? v : null;
-  });
-  return out;
-}
-
-/** Micronutrients from optional action input (absent = unknown = null). */
-function microsFromInput(args: Partial<MicroValues>): MicroValues {
-  const out = {} as MicroValues;
-  for (const k of MICRO_KEYS) out[k] = args[k] ?? null;
-  return out;
-}
-
-function sameMicros(a: MicroValues, b: MicroValues): boolean {
-  return MICRO_KEYS.every((k) => a[k] === b[k]);
-}
-
-/** Compact number for basis summaries: 150 stays "150", 66.7 stays "66.7". */
-const fmtNum = (n: number): string =>
-  Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10);
 
 // The stored calculation basis of a 配合計算 (source 'blend') food: the
 // parts it was computed from and what each part contributes to 100 g of
@@ -262,50 +211,6 @@ function toFoodOut(row: FoodRow): z.infer<typeof foodOut> {
     useCount: row.useCount,
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
   };
-}
-
-/**
- * Fill missing micronutrient keys with null on a stored JSON object
- * (blend parts, recipe ingredient lines). Rows written before the
- * micronutrient fields existed carry no such keys; filling them at
- * parse time keeps the strict schemas (and every reader) working with
- * "unknown" semantics instead of failing the whole payload.
- */
-function fillMicros(obj: unknown): unknown {
-  if (typeof obj !== "object" || obj === null) return obj;
-  return { ...emptyMicros(), ...(obj as Record<string, unknown>) };
-}
-
-/**
- * Stored-JSON schema versioning. Several tables keep structured
- * payloads as JSON text (assist_proposals.result_json,
- * recipe_imports.draft_json, recipes.ingredients_json,
- * foods.blend_json, meal_logs.assist_note). Until now the payload was
- * the bare object, so a future format change would have failed the
- * reader's schema parse silently — indistinguishable from corruption.
- * New writes wrap the payload as { v: STORED_JSON_VERSION, data }.
- * Readers unwrap: a payload WITHOUT a version marker is a legacy
- * (version 0) payload and is returned as-is; a payload WITH an unknown
- * version returns undefined — an explicit miss the caller can count
- * (see bumpMetric) and fall back from, never a silent mis-parse.
- */
-const STORED_JSON_VERSION = 1;
-
-function stringifyStoredJson(value: unknown): string {
-  return JSON.stringify({ v: STORED_JSON_VERSION, data: value });
-}
-
-function unwrapStoredJson(raw: unknown): unknown {
-  if (
-    raw != null &&
-    typeof raw === "object" &&
-    !Array.isArray(raw) &&
-    "v" in raw
-  ) {
-    const rec = raw as { v?: unknown; data?: unknown };
-    return rec.v === STORED_JSON_VERSION ? rec.data : undefined;
-  }
-  return raw;
 }
 
 /**
@@ -1086,63 +991,9 @@ const daySummaryOut = z.object({
   eatingOutCount: z.number(),
 });
 
-type DaySummary = z.infer<typeof daySummaryOut>;
-
-function summarize(date: string, rows: LogRow[]): DaySummary {
-  let kcal = 0,
-    p = 0,
-    f = 0,
-    c = 0,
-    salt = 0,
-    hasSalt = false,
-    eatingOutCount = 0;
-  for (const r of rows) {
-    kcal += r.kcal;
-    p += r.proteinG;
-    f += r.fatG;
-    c += r.carbsG;
-    if (r.saltG != null) {
-      salt += r.saltG;
-      hasSalt = true;
-    }
-    if (r.eatingOut === 1) eatingOutCount += 1;
-  }
-  return {
-    date,
-    logged: rows.length > 0,
-    entryCount: rows.length,
-    kcal: Math.round(kcal),
-    proteinG: round1(p),
-    fatG: round1(f),
-    carbsG: round1(c),
-    saltG: hasSalt ? round2(salt) : null,
-    // Micronutrient totals: known values summed, null when every entry
-    // is unknown for that nutrient (so "no data" never reads as 0).
-    ...sumMicros(rows.map((r) => microsOf(r))),
-    hasEatingOut: eatingOutCount > 0,
-    eatingOutCount,
-  };
-}
-
 const dateStr = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD");
-
-function dateToDays(s: string): number {
-  const [y = 0, m = 1, d = 1] = s.split("-").map(Number);
-  return Math.floor(Date.UTC(y, m - 1, d) / 86400000);
-}
-
-function daysToDate(n: number): string {
-  return new Date(n * 86400000).toISOString().slice(0, 10);
-}
-
-/** Today's calendar date in Asia/Tokyo (YYYY-MM-DD). */
-function todayJstStr(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo" }).format(
-    new Date(),
-  );
-}
 
 // ---------- consumption pace （消費ペース） ----------
 //
@@ -1572,13 +1423,6 @@ function toTargetHistoryOut(
   };
 }
 
-interface TargetValues {
-  kcal: number | null;
-  proteinG: number | null;
-  fatG: number | null;
-  carbsG: number | null;
-}
-
 async function readTargetValues(db: Db): Promise<TargetValues> {
   const rows = await db.select().from(schema.settings);
   const map = new Map(rows.map((r) => [r.key, r.value]));
@@ -1614,31 +1458,20 @@ async function writeTargetKey(
   }
 }
 
-/** Mirror the newest history row into the settings cache. */
+/**
+ * Mirror the newest history row into the settings cache. Which row is
+ * "newest" is decided by the core (latestTargetEntry), so the Space 版 and
+ * the ちゃんと版 derive the current targets the same way.
+ */
 async function syncSettingsFromHistory(db: Db): Promise<void> {
-  const rows = await db
-    .select()
-    .from(schema.targetHistory)
-    .orderBy(desc(schema.targetHistory.effectiveDate))
-    .limit(1);
-  const latest = rows[0];
+  const latest = latestTargetEntry(
+    await db.select().from(schema.targetHistory),
+  );
   if (!latest) return;
   await writeTargetKey(db, "target_kcal", latest.kcal);
   await writeTargetKey(db, "target_protein_g", latest.proteinG);
   await writeTargetKey(db, "target_fat_g", latest.fatG);
   await writeTargetKey(db, "target_carbs_g", latest.carbsG);
-}
-
-function sameTargetValues(
-  row: TargetHistoryRow,
-  v: { kcal: number; proteinG: number; fatG: number; carbsG: number },
-): boolean {
-  return (
-    row.kcal === v.kcal &&
-    row.proteinG === v.proteinG &&
-    row.fatG === v.fatG &&
-    row.carbsG === v.carbsG
-  );
 }
 
 /**
@@ -1670,7 +1503,7 @@ async function appendSettingsChangeToHistory(db: Db): Promise<void> {
     .where(eq(schema.targetHistory.effectiveDate, today));
   const todayRow = todayRows[0];
   if (todayRow) {
-    if (!sameTargetValues(todayRow, values)) {
+    if (!sameTargets(todayRow, values)) {
       await db
         .update(schema.targetHistory)
         .set({ ...values, updatedAt: new Date() })
@@ -1684,58 +1517,11 @@ async function appendSettingsChangeToHistory(db: Db): Promise<void> {
     .orderBy(desc(schema.targetHistory.effectiveDate))
     .limit(1);
   const latest = latestRows[0];
-  if (latest && sameTargetValues(latest, values)) return;
+  if (latest && sameTargets(latest, values)) return;
   await db.insert(schema.targetHistory).values({
     effectiveDate: today,
     ...values,
   });
-}
-
-/** Scale factor from a food's basis to the logged quantity. */
-function scaleFactor(food: FoodRow, quantity: number, unit: string): number {
-  if (food.basisType === "per100g") {
-    let grams: number;
-    if (unit === "g") {
-      grams = quantity;
-    } else if (food.unitGrams != null) {
-      grams = quantity * food.unitGrams;
-    } else {
-      throw new Error(
-        `「${food.name}」は${unit}あたりのグラム数が未設定のため、その単位では記録できません`,
-      );
-    }
-    return grams / 100;
-  }
-  // serving basis: quantity counts servings, unless given in grams.
-  if (unit === "g") {
-    if (food.unitGrams == null) {
-      throw new Error(
-        `「${food.name}」は1単位のグラム数が未設定のため、グラムでは記録できません`,
-      );
-    }
-    return quantity / food.unitGrams;
-  }
-  return quantity;
-}
-
-function nutrientsFor(food: FoodRow, quantity: number, unit: string) {
-  const k = scaleFactor(food, quantity, unit);
-  return {
-    kcal: Math.round(food.kcal * k),
-    proteinG: round1(food.proteinG * k),
-    fatG: round1(food.fatG * k),
-    carbsG: round1(food.carbsG * k),
-    saltG: food.saltG == null ? null : round2(food.saltG * k),
-    ...scaleMicros(microsOf(food), k),
-  };
-}
-
-async function loadDay(db: Db, date: string): Promise<LogRow[]> {
-  return db
-    .select()
-    .from(schema.mealLogs)
-    .where(eq(schema.mealLogs.date, date))
-    .orderBy(asc(schema.mealLogs.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -1846,15 +1632,6 @@ function perServingOf(
     ...scaleMicros(microsOf(totals), 1 / servings),
     complete: totals.complete,
   };
-}
-
-/** Nutrients of `grams` of a master food, or null when not convertible. */
-function nutrientsForGrams(food: FoodRow, grams: number) {
-  if (food.basisType === "per100g") {
-    return nutrientsFor(food, grams, "g");
-  }
-  if (food.unitGrams == null) return null;
-  return nutrientsFor(food, grams / food.unitGrams, food.defaultUnit);
 }
 
 /**
@@ -2482,7 +2259,7 @@ export const Actions = {
           fatG: f.fatG,
           carbsG: f.carbsG,
           saltG: f.saltG,
-          ...(tableRow ? microsFromTableRow(tableRow) : emptyMicros()),
+          ...(tableRow ? microsFromTuple(tableRow) : emptyMicros()),
           source: "table",
           sourceName: FOOD_TABLE_SOURCE_NAME,
           sourceUrl: FOOD_TABLE_SOURCE_URL,
@@ -2593,7 +2370,7 @@ export const Actions = {
       const claimed = new Set<number>();
       for (const row of FOOD_TABLE) {
         const [no, name, kcal, p, f, c, salt] = row;
-        const micros = microsFromTableRow(row);
+        const micros = microsFromTuple(row);
         const present = byNo.get(no);
         if (present) {
           // Already imported: refresh ONLY the micronutrients on table
@@ -5031,44 +4808,26 @@ export const Actions = {
         .optional(),
     }),
     response: z.object({ entry: logOut }),
+    // 入力の範囲の正本はコアの LogMealInput（packages/core/src/usecases/
+    // mealLog.ts）。境界ではホストの zod が先に見るので同じ範囲をここにも
+    // 書いてあり、コアが受け取った入力をもう一度検証する。P3 でイベント型
+    // から生成して一本化する。
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const foods = await db
-        .select()
-        .from(schema.foods)
-        .where(eq(schema.foods.id, args.foodId))
-        .limit(1);
-      const food = foods[0];
-      if (!food) throw new Error("指定された食品が見つかりません");
-      // The assist note claims a base food; it must be the food actually
-      // being logged, so a note can never describe a different basis
-      // than the snapshot was computed from.
-      if (args.assistNote && args.assistNote.baseFoodName !== food.name) {
-        throw new Error("換算メモの基準食品が、記録する食品と一致しません");
-      }
-      const n = nutrientsFor(food, args.quantity, args.unit);
-      const inserted = await db
-        .insert(schema.mealLogs)
-        .values({
-          date: args.date,
-          slot: args.slot,
-          foodId: food.id,
-          foodName: food.name,
-          quantity: args.quantity,
-          unit: args.unit,
-          eatingOut: args.eatingOut ? 1 : 0,
-          assistNote: args.assistNote
-            ? stringifyStoredJson(args.assistNote)
-            : null,
-          ...n,
-        })
-        .returning();
-      const row = inserted[0];
-      if (!row) throw new Error("logMeal: insert returned no rows");
+      // 入力の検証・マスタ値からの栄養値の計算・スナップショットの作成は
+      // 共通コア（packages/core/src/usecases/mealLog.ts）。ここは器として
+      // アダプタを渡し、Space 版だけの後始末をする。
+      const row = await coreLogMeal(mealLogDeps(db), args);
+      // 利用回数（よく使う食品を検索で上に出すための並び順）は Space 版
+      // だけの関心なので、コアの計算には混ぜない。ちゃんと版では公開マスタ
+      // から外し、ログから導出する（docs/plan.md、docs/actions-inventory.md）。
       await db
         .update(schema.foods)
-        .set({ useCount: food.useCount + 1, lastUsedAt: new Date() })
-        .where(eq(schema.foods.id, food.id));
+        .set({
+          useCount: sql`${schema.foods.useCount} + 1`,
+          lastUsedAt: new Date(),
+        })
+        .where(eq(schema.foods.id, args.foodId));
       ctx.invalidateQueries();
       return { entry: toLogOut(row) };
     },
@@ -5260,7 +5019,7 @@ export const Actions = {
     response: z.object({ entries: z.array(logOut) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const rows = await loadDay(db, args.date);
+      const rows = await coreListDayEntries(mealLogDeps(db), args.date);
       return { entries: rows.map(toLogOut) };
     },
   }),
@@ -5272,8 +5031,8 @@ export const Actions = {
     response: z.object({ summary: daySummaryOut }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const rows = await loadDay(db, args.date);
-      return { summary: summarize(args.date, rows) };
+      const summary = await coreGetDailySummary(mealLogDeps(db), args.date);
+      return { summary };
     },
   }),
 
@@ -5284,32 +5043,11 @@ export const Actions = {
     response: z.object({ summaries: z.array(daySummaryOut) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const start = dateToDays(args.startDate);
-      const end = dateToDays(args.endDate);
-      if (end < start || end - start > 365) {
-        throw new Error("期間指定が不正です（最大366日）");
-      }
-      const rows = await db
-        .select()
-        .from(schema.mealLogs)
-        .where(
-          and(
-            gte(schema.mealLogs.date, args.startDate),
-            lte(schema.mealLogs.date, args.endDate),
-          ),
-        )
-        .orderBy(asc(schema.mealLogs.id));
-      const byDate = new Map<string, LogRow[]>();
-      for (const r of rows) {
-        const list = byDate.get(r.date) ?? [];
-        list.push(r);
-        byDate.set(r.date, list);
-      }
-      const summaries: DaySummary[] = [];
-      for (let d = start; d <= end; d++) {
-        const date = daysToDate(d);
-        summaries.push(summarize(date, byDate.get(date) ?? []));
-      }
+      const summaries = await coreGetDailySummaries(
+        mealLogDeps(db),
+        args.startDate,
+        args.endDate,
+      );
       return { summaries };
     },
   }),
