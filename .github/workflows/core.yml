@@ -1,0 +1,35 @@
+name: core
+
+# 共通コア（packages/core）だけを対象にする。
+# Space 版（client/、server/）は Muse のホスト SDK を file:/opt/hatch/... で参照しているため、
+# GitHub の環境では install すらできない。CI では触らない。
+on:
+  push:
+    branches:
+      - main
+      - dev/two-tier
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/core
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # --frozen-lockfile は使わない。bun.lock は Muse 側の bun（lockfileVersion 2）が
+      # 書いたもので、古い bun では読めずにこけるため。依存は zod のみで、解決はすぐ終わる。
+      - name: install
+        run: bun install
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: test
+        run: bun test
