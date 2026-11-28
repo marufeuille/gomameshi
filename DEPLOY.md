@@ -8,7 +8,13 @@
 - これは Muse の TypeScript web artifact（Space）のソースである。
   ランタイム情報は `space.json`（runtime: typescript / platformVersion: 28 / entry: client/dist/index.html）が正本。
 - 構成: `client/`（React）、`server/src/actions.ts`（サーバーアクション）、
-  `server/src/schema.ts`（DB スキーマ）、`drizzle/`（マイグレーション）。
+  `packages/core/`（共通コア: DB スキーマ、栄養値の計算、検証ルール）、
+  `server/src/schema.ts`（共通コアのスキーマを再 export するだけ）、
+  `drizzle/`（マイグレーション）。
+  `server/src/actions.ts` は `packages/core/src` を相対 import で参照するので、
+  **`packages/core/` を含めてファイル構成のまま持っていく**こと（欠けるとビルドが通らない）。
+  共通コアが使う npm パッケージ（zod・drizzle-orm）は直下の `package.json` にあるものと
+  同じで、`packages/core` の中で install する必要はない。
 - 個人データは含まれていない。食事ログ・目標値・利用者が追加した食品はすべて空の状態から始まる。
 
 ## 手順
