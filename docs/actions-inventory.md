@@ -149,7 +149,7 @@
 
 | テーブル | 中身 | 注意 |
 | --- | --- | --- |
-| `foods` | 食品マスタ。`source` は `table`（成分表 約2,500件）/ `label` / `manual` / `ai` / `blend` | **`use_count` と `last_used_at` は個人の利用履歴**。公開マスタのテーブルに個人データが混ざっている（後述） |
+| `foods` | 食品マスタ。`source` は `table`（成分表 約2,500件）/ `label` / `manual` / `ai` / `blend` | **`use_count` と `last_used_at` は個人の利用履歴**。公開マスタのテーブルに個人データが混ざっている。→ 公開マスタから外してログから導出する（後述の決定） |
 | `recipes` | 保存したレシピ。材料行・合計値 | 計画書は公開マスタに含める方針。自作レシピを公開扱いにするかは未決 |
 
 ### 個人データ（ちゃんと版ではスマホが正本）
@@ -175,17 +175,52 @@
 
 1. **アクションは48個**。計画書の「47個」は1件少ない。
 2. **`ctx.tool.web_search` が計画書のホスト依存表に無い**。`lookupFoodInfo` の1箇所（3188行）。P2 の対象に含める。
-3. **`foods` に個人データが混ざっている**。`use_count` / `last_used_at` を `logMeal`（5070行）と `logAssistParts`（5209行）が更新し、`listFoods`（2514行）・`assistMealInput`（4760行）・`listUsedFoods`（5567行）・`suggestRelatedFoods`（5646行）・消費ペースの名前解決（1339行、同名なら最も使われた食品を採る）が並び順に使う。マスタをクラウドに平文で置くなら、「よく使う」の情報はどこに置くかを決めないと、公開マスタから食生活が読める。
+3. **`foods` に個人データが混ざっている**。`use_count` / `last_used_at` を `logMeal`（5070行）と `logAssistParts`（5209行）が更新し、`listFoods`（2514行）・`assistMealInput`（4760行）・`listUsedFoods`（5567行）・`suggestRelatedFoods`（5646行）・消費ペースの名前解決（1339行、同名なら最も使われた食品を採る）が並び順に使う。マスタをクラウドに平文で置くなら、「よく使う」の情報はどこに置くかを決めないと、公開マスタから食生活が読める。→ 後述の「決定: 利用回数はログから導出する」で解消。
 4. **推論を使うアクションは5件・8呼び出し**で、計画書が名前で挙げていた3種（写真読み取り・食事入力アシスト・食品リサーチ）に加えて `parseBlendText` と `importRecipeFromPhoto` がある。
 5. **読み取りアクションに書き込みの副作用がある**。`getDeepFoodResearch` / `listDeepFoodResearchJobs` / `listUnregisteredResearchDrafts` が `expireStaleDeepJobs`（850行）を、`getRecipeImport` が `expireStaleRecipeImport`（2286行）を呼び、6分無応答のジョブを failed に落として `ai_metrics` を加算する。閲覧ビューに置き換えるとき、この期限切れ処理をスマホ・受け箱のどちらが持つかを決める必要がある。
 6. **`ctx.agent` を使う2箇所は、エージェントが呼び返すアクションの引数スキーマをプロンプト本文で指示している**（918行・4334行）。P3 でスキーマからツール定義を生成するなら、この指示文も同じ正本から作れる。
-7. `logRecipe` だけ `use_count` を更新しない（`logMeal` / `logAssistParts` は更新する）。既存の非対称で、イベント化のときに揃えるか決める。
+7. `logRecipe` だけ `use_count` を更新しない（`logMeal` / `logAssistParts` は更新する）。`deleteMealLog` も減算しない。既存の非対称で、利用回数を導出に変えれば揃う（後述の決定）。
 8. `deleteMealLog` / `deleteFood` / `deleteRecipe` / `deleteTargetHistory` は物理削除。ちゃんと版では取り消しイベントになるので、イベント定義に削除の表現が必要（`events.ts` の方針どおり）。
+
+## 決定: 利用回数（`use_count` / `last_used_at`）はログから導出する
+
+気づき3の未決事項を解消した。**公開マスタから外し、イベント（食事記録）から導出する個人データとして扱う**。スマホが `FrequentView`（`packages/core/src/types/views.ts:63`）として公開し、リレーはその最新コピーを返すだけにする。
+
+コアの `Food` 型（`packages/core/src/types/master.ts:84`）には最初から利用回数が無く、`FrequentView` には `count` がある。この決定は型の下書きどおりなので、**`packages/core` に変更は要らない**。
+
+### 理由
+
+1. **混在の解消**。公開マスタは平文でクラウドに置く前提なので、利用回数を同じ行に持つと公開マスタから食生活が読める。
+2. **今のカウンタは既に実態と合っていない**。`logMeal`（5070行）と `logAssistParts`（5209行、部品ごとの食品1件につき1回）は加算するが、`logRecipe` は加算せず、`deleteMealLog` は減算しない。つまりレシピ経由の記録を数え落とし、削除した記録を数え続ける単調増加のカウンタになっている。ログから導出すればどちらも自動的に直る。
+
+### 導出の仕方
+
+`computeConsumption`（1300行付近）が既に同じ解決をしている — 直接の記録・アシスト分解の部品・レシピ記録を材料行に展開する3経路。`FrequentView` の `count` はこの3経路の件数、`last_used_at` は最終記録日。
+
+ちゃんと版ではイベントが食品の id と rev を持つので、分解部品の名前解決（1339行、同名なら最も使われた食品を採るという今の妥協）は不要になる。
+
+### 決めたこと
+
+- **ビューに無い食品の `count` は `null`**（0 ではない）。「使ったことがない」と「上位N件に載っていない」を区別する。不明は null の原則どおり
+- **利用回数を検索の絞り込みの一次キーにしない**。`search_foods` は計画書どおり照合スコアで最大16件を返し、利用回数は同スコアの tie-break と表示に回す。ビューが古い・未取得のときは名前順にフォールバックする
+- **簡易版（Space 版）は列をそのまま残す**（配置を動かさない原則）。コアへ移す照合ロジックは利用回数を引数に取らず、並び順は呼び出し側が渡す形にして、`topFoodMatches` は書き換えずに済ませる
+
+### 精度の確認が要る点（P2 の評価セット）
+
+今の Space 版は、利用回数が「エージェントに見える候補」を実際に決めている。
+
+- `listFoods`（2514行）は利用回数の降順に並べてから `limit`（既定80）で切るので、どの80件が見えるかを利用回数が決めている。スキルが使う検索口はこれ
+- `topFoodMatches`（2076行）のソートは安定ソートなので、入力順（＝利用回数の降順）が同スコア時の tie-break として効く。`assistMealInput` はキーワードごとに上位6件を取るので、同スコアの食品が多いときは利用回数が候補16件の中身を変える
+
+score-first に変える影響は、計画書の評価セット（「16件に正解が入る率」「最終的に正解を選ぶ率」）で今の Space 版と比べて確かめる。
+
+### 影響するアクション
+
+`listFoods`（並び順）、`listUsedFoods`（`FrequentView` そのものになる）、`assistMealInput`（候補プールの tie-break）、`suggestRelatedFoods`（tie-break）、`logMeal` / `logAssistParts`（加算をやめる）、`getConsumptionStats`（個人データ側で動くのでそのまま）。
 
 ## 未決事項
 
 - [ ] **`recipes` と、利用者が登録した `foods`（`label` / `ai` / `blend`）を公開マスタに置くか個人データに置くか**。計画書の表は「登録した市販品、レシピも含む」として公開マスタ扱いだが、何を登録したか自体が食生活を示す。配合食品（`blend`）は特に私的
-- [ ] **`foods.use_count` / `last_used_at` の置き場所**（気づき3）。公開マスタから外してスマホ側に持つのか、クラウドに残すのか
 - [ ] **`assist_proposals` キャッシュをちゃんと版で残すか**。残すならスマホ側。捨てると `assistMealInput` の再試行コストが戻る
 - [ ] **`consumption_groups` を落とす方針（計画書）を採るなら**、`listConsumptionGroups` / `saveConsumptionGroup` / `deleteConsumptionGroup` の3件が消え、`getConsumptionStats` / `listUsedFoods` / `suggestRelatedFoods` は「よく使う組み合わせ」ビューに寄る
 - [ ] **読み取りの副作用（期限切れ処理）の持ち主**（気づき5）
