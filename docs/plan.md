@@ -150,6 +150,7 @@ flowchart TB
 - [ ] AI処理の状態テーブル（`assist_proposals`・`food_research`・`food_research_jobs`・`recipe_imports`）：ちゃんと版では持たないことに決定。どれもホストに仕事をさせるための足場で、エージェントが自分のターンで調べるなら投げる先も待つ相手もいない。`report*` / `complete*` の4コールバックと `ai_metrics`・`getAiMetrics` も一緒に落ちる
 - [ ] 摂取グループ：データモデルから外し、スマホのローカルUI設定にすることに決定。消費ペースは食品ごとのビューで出し、まとめ方は読み手が決める。`suggestRelatedFoods` は公開マスタだけで計算できる純関数なのでコアに残す
 - [ ] 読み取りの副作用（期限切れ処理）：ちゃんと版には持ち込まず、鮮度を返す形（`ViewMeta` / `EventStatusView`）に置き換えることに決定。P1 でコアに入れない
+- [ ] 書き込みに対応するイベント型が無かった5箇所：形を決定（実装は P3）。外食フラグは専用の訂正イベント `entry.eating_out_set`、目標履歴は編集＝同じ `effectiveDate` への再投函で後が勝つ・削除＝`target.retracted`、マスタ項目の削除は作らず引退リビジョンで表す（`ErrorCode` に `retired_food` を足す）、`RecipeSubmission` は `FoodSubmission` と同じ二層。`settings` はイベント列から導出するので持たない。詳細は `docs/actions-inventory.md`
 - [ ] 利用回数（`use_count` / `last_used_at`）の置き場所：公開マスタから外し、イベントから導出して「よく使うもの」ビューで公開することに決定。検索の絞り込みの一次キーにはしない（詳細と精度確認の宿題は `docs/actions-inventory.md`）
 
 * 閲覧ビューの鮮度：エージェントが見るのは、スマホが最後に同期した時点のサマリ。「いま何kcal？」には古い値を返すことがあるので、ビューに更新時刻を必ず付ける

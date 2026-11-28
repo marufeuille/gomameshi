@@ -300,7 +300,7 @@ score-first に変える影響は、計画書の評価セット（「16件に正
 
 ## 書き込み16件とイベント型の対応（P3 への引き継ぎ）
 
-ここまでの決定で、ちゃんと版の口は「イベント投函」「マスタ登録」「ビューの読み取り」の3種に整理される。今の書き込み16件を `events.ts` の投函型5種と `master.ts` の `FoodSubmission` に突き合わせると、**5箇所に対応先が無い**。
+ここまでの決定で、ちゃんと版の口は「イベント投函」「マスタ登録」「ビューの読み取り」の3種に整理される。今の書き込み16件を `events.ts` の投函型5種と `master.ts` の `FoodSubmission` に突き合わせると、**5箇所に対応先が無かった**。埋め方は次節で決めた。
 
 | 今の書き込み | ちゃんと版の対応 | |
 | --- | --- | --- |
@@ -310,20 +310,54 @@ score-first に変える影響は、計画書の評価セット（「16件に正
 | `deleteMealLog` | `entry.retracted` | ある |
 | `updateSettings`・`upsertTargetHistory`（追加）・`seedTargetHistory` | `target.set` | ある |
 | `upsertFood`・`saveBlendFood` | `FoodSubmission` | ある |
-| `setMealLogEatingOut` | — | **無い**：外食フラグだけを変えるイベント |
-| `upsertTargetHistory`（既存行の編集）・`deleteTargetHistory` | — | **無い**：目標履歴の訂正・削除。同じ `effectiveDate` への再投函を「後が勝つ」と決めれば編集は賄えるが、削除は賄えない |
-| `deleteFood` | — | **無い**：マスタ項目の削除・引退。マスタは不変リビジョンなので「削除」が何を意味するかから決める必要がある |
-| `saveRecipe` | — | **無い**：`master.ts` に `RecipeSubmission` が無い（`Recipe` 型はあるが、エージェントが投函する形が未定義） |
-| `deleteRecipe` | — | **無い**：同上 |
+| `setMealLogEatingOut` | `entry.eating_out_set`（足す） | 対応先が無かった → 次節 |
+| `upsertTargetHistory`（既存行の編集） | `target.set`（後が勝つ） | 対応先が無かった → 次節 |
+| `deleteTargetHistory` | `target.retracted`（足す） | 対応先が無かった → 次節 |
+| `deleteFood` | 引退リビジョン（削除は作らない） | 対応先が無かった → 次節 |
+| `saveRecipe` | `RecipeSubmission`（足す） | 対応先が無かった → 次節 |
+| `deleteRecipe` | 引退リビジョン（削除は作らない） | 対応先が無かった → 次節 |
 | `deleteResearch` | 消える | AI処理の状態テーブルの決定より |
 | `saveConsumptionGroup`・`deleteConsumptionGroup` | 消える | 摂取グループの決定より |
 
+## 決定: 対応先が無かった5箇所の埋め方（P3 の前提）
+
+型は P3 で実装する。ここで決めるのは形だけで、`packages/core` はまだ変えない（この PR は P0 の棚卸し）。
+
+### 外食フラグだけの変更 → 専用の訂正イベントを足す
+
+`entry.eating_out_set { target: EntryRef, eatingOut: boolean }` を足す。「取り消し＋再登録」では済ませない。
+
+- フラグは**記録についての印**で、食べた内容ではない。今の `setMealLogEatingOut` も「栄養値のスナップショットは触らず、フラグだけ変える」と明記している
+- **取り消し＋再登録にすると栄養値が書き換わりうる**。投函で `rev` を省略するとリレーが現在の rev を打つので（`events.ts:28`）、あいだにマスタが直っていた記録を再登録すると数値が変わる。印の付け替えで過去の数値が動くのは誤り
+- そもそも再登録ができない。`DailyView.entries[]`（`views.ts:36`）は `ref` / `slot` / `name` / `amount` / `nutrients` / `eatingOut` を返すが**食品の `{id, rev}` を返さない**ので、エージェントは読み戻した記録を投函の形に組み直せない
+- 「訂正は取り消し＋再登録」の原則は**食べた内容の訂正**に適用する。印の付け替えには適用しない。ログが「イベントの素直な再生」である性質は、再生順に適用すれば保たれる
+
+### 目標履歴の訂正・削除 → 編集は「後が勝つ」、削除は専用イベント
+
+- **編集**: 同じ `effectiveDate` への後の `target.set` が前を置き換える（後が勝つ）。`target_history.effective_date` が unique なのは今の DB と同じで、再生でも日付ごとに最後の値を採るだけで表せる
+- **削除**: `target.retracted { effectiveDate, reason? }` を足す。`entry.retracted` は使い回さない — `EntryRef` は `{eventId, item}` でログの記録を指すが、目標は記録ではなく日付でキーされる。同じ日付に2回 `target.set` できる（後が勝つ）ので、eventId で指すと脆い
+- **`settings` テーブルはちゃんと版では持たない**。`settings` が持っているのは目標値4キー（`target_kcal` / `target_protein_g` / `target_fat_g` / `target_carbs_g`）だけで、`target_history` の最新行のキャッシュ。利用回数と同じで、キャッシュせずイベント列から導出する
+- **目標値の一部だけ未設定にする道は作らない**。今の `updateSettings` は1項目を null にできるが、`target_history` は4つとも notNull、コアの `TargetSetIn` も4つとも必須、`DaySummary.targets` も全体が nullable。**4つ揃いで1組**に統一する。既存データで一部だけ入っている場合の扱いは移行（P6）で決める
+
+### マスタ項目の削除・引退 → 削除は無い。引退をリビジョンで表す
+
+- `deleteFood` / `deleteRecipe` に当たる操作は**作らない**。イベントが `{id, rev}` を固定しているので、消すと過去の記録の参照が壊れる。計画書の「過去の記録は、食品の rev を固定しているので、あとでマスタを直しても変わらない」を守る
+- 代わりに**引退した新リビジョンを積む**（`retired: true` 相当）。過去のイベントは古い rev を指しているので記録は無傷。今の Space 版が「過去ログはスナップショットなので無影響」としているのと同じ結果を、rev で得る
+- 引退したリビジョンは `search_foods` の候補に出さない。`{id, rev}` で明示的に参照されたときだけ解決する
+- 新規の投函が引退リビジョンを参照したら却下する。`ErrorCode`（`receipt.ts:39`）に **`retired_food` を足す**。`unknown_food` に寄せない — 却下の `candidates` に後継を出せば、エージェントは言い換えずに差し替えられる
+
+### `RecipeSubmission` → `FoodSubmission` と同じ二層にする
+
+- `RecipeSubmission { id?: RecipeId, title, servings, servingsLabel?, source, ingredients }`。`id` を渡せば新リビジョン、省略すれば新規（`FoodSubmission` と同じ規則）。`id` / `rev` / `createdAt` はリレーが打つ
+- 材料行の `food` 種は投函では **`{ id, rev? }`**（`FoodRefIn` と同じ）。リレーが現在の rev を打って保存形（`rev` 必須）にする
+- **栄養値は投函させない**。コアの `Recipe` 型には合計値が無く（今の `recipes.totals_*` はスナップショット列）、材料行からコアが計算する。「栄養値を発明しない」の形がすでに型に出ている
+- `servings` は必須（コアの `Recipe` は `z.number().positive()`）。今の `recipes.servings` は nullable で `logRecipe` が未設定なら例外を投げるので、必須にするほうが実態に合う
+
+### 検索精度は決める話ではない
+
+`listFoods` を score-first にしたときの精度は**測る**ことしかできない。計画書の評価セット（「16件に正解が入る率」「最終的に正解を選ぶ率」）で今の Space 版と比べる P2 の作業として残す。
+
 ## 未決事項
 
-ここまでの決定で元の6件は片付いた。代わりに、上の突き合わせで出た穴が P3 の課題として残る。
-
-- [ ] **外食フラグだけの変更**に対応するイベントを足すか、「取り消し＋再登録」で済ませるか
-- [ ] **目標履歴の訂正・削除**。同じ `effectiveDate` への再投函を「後が勝つ」とするか、`target.retracted` を足すか
-- [ ] **マスタ項目の削除・引退**。不変リビジョンの上で `deleteFood` / `deleteRecipe` が何を意味するか（引退フラグ付きの新リビジョンが候補）
-- [ ] **`RecipeSubmission` の定義**。レシピは複合食品なので、材料行の `{id, rev}` をリレーが打つかどうかも決める
-- [ ] **`listFoods` を score-first にしたときの検索精度**（利用回数の決定より）。P2 の評価セットで今の Space 版と比べる
+- [ ] **`listFoods` を score-first にしたときの検索精度**。P2 の評価セットで今の Space 版と比べる（決める話ではなく測る話）
+- [ ] **目標値が一部だけ入っている既存データの移行**。4つ揃いで1組に統一すると決めたので、P6 の移行手順で埋めるか落とすかを決める
